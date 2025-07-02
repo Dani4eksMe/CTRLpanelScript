@@ -7,7 +7,7 @@
 
 # --- Переменные ---
 # Замените на ваш email для SSL сертификата
-ADMIN_EMAIL="dani4reks@gmail.com"
+ADMIN_EMAIL="admin@example.com"
 # Домен, который будет использоваться для панели
 DOMAIN="my.yoogo.su"
 # Генерируем случайный пароль для базы данных
@@ -21,59 +21,76 @@ function print_info {
     echo -e "\n\e[34m[INFO]\e[0m $1"
 }
 
-# Функция для вывода сообщений об ошибках и завершения работы
-function print_error {
-    echo -e "\n\e[31m[ERROR]\e[0m $1"
-    exit 1
+# Функция для очистки установки
+function cleanup_installation {
+    print_info "Остановка служб..."
+    sudo systemctl stop ctrlpanel.service 2>/dev/null
+    sudo systemctl disable ctrlpanel.service 2>/dev/null
+    sudo rm -f /etc/systemd/system/ctrlpanel.service 2>/dev/null
+    sudo systemctl daemon-reload 2>/dev/null
+    sudo systemctl stop nginx 2>/dev/null
+    sudo systemctl stop mariadb 2>/dev/null
+    sudo systemctl stop redis-server 2>/dev/null
+
+    print_info "Удаление cron задачи..."
+    (sudo crontab -l 2>/dev/null | grep -v "/var/www/ctrlpanel/artisan schedule:run") | sudo crontab - 2>/dev/null
+
+    print_info "Удаление конфигураций Nginx и SSL-сертификатов..."
+    sudo rm -f /etc/nginx/sites-enabled/ctrlpanel.conf 2>/dev/null
+    sudo rm -f /etc/nginx/sites-available/ctrlpanel.conf 2>/dev/null
+    # Удаляем SSL-сертификаты и связанные конфигурации Certbot
+    sudo certbot delete --non-interactive --cert-name "$DOMAIN" 2>/dev/null
+
+    print_info "Удаление базы данных и пользователя MariaDB..."
+    # Убедимся, что MariaDB запущена для очистки
+    sudo systemctl start mariadb 2>/dev/null
+    if sudo mysql -u root -p"$DB_PASSWORD" -e "DROP DATABASE IF EXISTS $DB_NAME;" 2>/dev/null; then
+        print_info "База данных '$DB_NAME' удалена."
+    fi
+    if sudo mysql -u root -p"$DB_PASSWORD" -e "DROP USER IF EXISTS '$DB_USER'@'127.0.0.1';" 2>/dev/null; then
+        print_info "Пользователь базы данных '$DB_USER' удален."
+    fi
+    sudo systemctl stop mariadb 2>/dev/null
+
+
+    print_info "Удаление директории приложения..."
+    sudo rm -rf /var/www/ctrlpanel 2>/dev/null
+
+    print_info "Удаление установленных пакетов..."
+    # Список пакетов, которые могли быть установлены скриптом
+    PACKAGES_TO_REMOVE="php8.3 php8.3-common php8.3-cli php8.3-gd php8.3-mysql php8.3-mbstring php8.3-bcmath php8.3-xml php8.3-fpm php8.3-curl php8.3-zip php8.3-intl php8.3-redis mariadb-server nginx git redis-server certbot python3-certbot-nginx ufw composer"
+    for pkg in $PACKAGES_TO_REMOVE; do
+        if dpkg -s "$pkg" &>/dev/null; then # Проверяем, установлен ли пакет
+            print_info "Удаление пакета: $pkg"
+            sudo apt-get -y purge "$pkg" 2>/dev/null
+        fi
+    done
+    sudo apt-get -y autoremove 2>/dev/null
+    sudo apt-get -y clean 2>/dev/null
+
+    print_info "Удаление добавленных PPA и репозиториев (если применимо, будьте осторожны)..."
+    # Эта часть закомментирована, так как может быть слишком агрессивной, раскомментируйте, если действительно необходимо.
+    # sudo add-apt-repository --remove ppa:ondrej/php -y 2>/dev/null
+    # sudo rm -f /etc/apt/sources.list.d/redis.list 2>/dev/null
+    # sudo rm -f /etc/apt/sources.list.d/mariadb.list 2>/dev/null
+    # sudo apt-get update 2>/dev/null
 }
 
-# Функция для проверки и настройки брандмауэра UFW
-function check_and_configure_firewall {
-    print_info "Проверка и настройка брандмауэра UFW..."
-    if command -v ufw &> /dev/null; then
-        UFW_STATUS=$(sudo ufw status | grep "Status: active")
-        if [[ "$UFW_STATUS" == *"Status: active"* ]]; then
-            print_info "UFW активен. Проверка правил для портов 80, 443 и OpenSSH..."
-            
-            # Проверка и разрешение порта 80
-            PORT_80_ALLOWED=$(sudo ufw status | grep -E "80\s+(ALLOW|ALLOW IN)")
-            if [[ -z "$PORT_80_ALLOWED" ]]; then
-                print_info "Порт 80 не разрешен. Добавление правила..."
-                sudo ufw allow 80/tcp
-                if [ $? -ne 0 ]; then print_error "Не удалось разрешить порт 80 в UFW."; fi
-            else
-                print_info "Порт 80 уже разрешен."
-            fi
-
-            # Проверка и разрешение порта 443
-            PORT_443_ALLOWED=$(sudo ufw status | grep -E "443\s+(ALLOW|ALLOW IN)")
-            if [[ -z "$PORT_443_ALLOWED" ]]; then
-                print_info "Порт 443 не разрешен. Добавление правила..."
-                sudo ufw allow 443/tcp
-                if [ $? -ne 0 ]; then print_error "Не удалось разрешить порт 443 в UFW."; fi
-            else
-                print_info "Порт 443 уже разрешен."
-            fi
-            
-            # Проверка и разрешение OpenSSH (чтобы не заблокировать себя)
-            SSH_ALLOWED=$(sudo ufw status | grep -E "OpenSSH\s+ALLOW")
-            if [[ -z "$SSH_ALLOWED" ]]; then
-                print_info "OpenSSH не разрешен. Добавление правила..."
-                sudo ufw allow OpenSSH
-                if [ $? -ne 0 ]; then print_error "Не удалось разрешить OpenSSH в UFW."; fi
-            else
-                print_info "OpenSSH уже разрешен."
-            fi
-
-            print_info "Перезагрузка UFW для применения изменений..."
-            sudo ufw reload
-            print_info "UFW настроен."
-        else
-            print_info "UFW не активен. Продолжаем без настройки UFW."
-        fi
+# Функция для вывода сообщений об ошибках и завершения работы
+function print_error {
+    echo -e "\n\e[31m[ERROR]\e[0m $1" >&2 # Вывод в stderr
+    echo -e "\n\e[31mУстановка не может быть продолжена из-за ошибки.\e[0m" >&2
+    echo -e "Хотите ли вы очистить все, что было установлено скриптом до этого момента? (Нажмите ПРОБЕЛ для подтверждения, любую другую клавишу для выхода)"
+    read -n 1 -s -r KEY # Читаем один символ без отображения
+    echo # Новая строка после ввода
+    if [[ "$KEY" == " " ]]; then
+        print_info "Начало очистки..."
+        cleanup_installation
+        print_info "Очистка завершена. Выход."
     else
-        print_info "UFW не установлен. Продолжаем без настройки UFW."
+        print_info "Очистка отменена. Выход."
     fi
+    exit 1
 }
 
 
@@ -83,46 +100,42 @@ sleep 3
 
 # --- 1. Установка зависимостей ---
 print_info "Обновление системы и установка базовых зависимостей..."
-sudo apt-get update
-sudo apt-get -y install software-properties-common curl apt-transport-https ca-certificates gnupg
+sudo apt-get update || print_error "Не удалось обновить список пакетов."
+sudo apt-get -y install software-properties-common curl apt-transport-https ca-certificates gnupg || print_error "Не удалось установить базовые зависимости."
 
 # Добавление репозитория PHP
 print_info "Добавление PPA для PHP 8.3..."
-sudo LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php
-if [ $? -ne 0 ]; then print_error "Не удалось добавить PPA для PHP."; fi
+sudo LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php || print_error "Не удалось добавить PPA для PHP."
 
 # Добавление репозитория Redis
 print_info "Добавление репозитория Redis..."
-curl -fsSL https://packages.redis.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/redis.list
+curl -fsSL https://packages.redis.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg || print_error "Не удалось добавить ключ GPG для Redis."
+echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/redis.list || print_error "Не удалось добавить репозиторий Redis."
 
 # Добавление репозитория MariaDB
 print_info "Добавление репозитория MariaDB..."
-curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash
-if [ $? -ne 0 ]; then print_error "Не удалось добавить репозиторий MariaDB."; fi
+curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash || print_error "Не удалось добавить репозиторий MariaDB."
 
 # Обновление списка пакетов после добавления репозиториев
 print_info "Повторное обновление списка пакетов..."
-sudo apt-get update
+sudo apt-get update || print_error "Не удалось повторно обновить список пакетов после добавления репозиториев."
 
 # Установка основных пакетов (добавлен ufw)
 print_info "Установка PHP, MariaDB, Nginx, Redis, UFW и других утилит..."
-sudo apt-get -y install php8.3 php8.3-{common,cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,redis} mariadb-server nginx git redis-server certbot python3-certbot-nginx ufw
-if [ $? -ne 0 ]; then print_error "Произошла ошибка при установке пакетов."; fi
+sudo apt-get -y install php8.3 php8.3-{common,cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,redis} mariadb-server nginx git redis-server certbot python3-certbot-nginx ufw || print_error "Произошла ошибка при установке пакетов."
 
 # Вызов функции настройки брандмауэра
 check_and_configure_firewall
 
 # Включение Redis
 print_info "Включение и запуск службы Redis..."
-sudo systemctl enable --now redis-server
+sudo systemctl enable --now redis-server || print_error "Не удалось включить и запустить службу Redis."
 
 # --- 2. Установка Composer ---
 print_info "Установка Composer..."
 if ! command -v composer &> /dev/null
 then
-    curl -sS https://getcomposer.org/installer | sudo php -- --install-dir=/usr/local/bin --filename=composer
-    if [ $? -ne 0 ]; then print_error "Не удалось установить Composer."; fi
+    curl -sS https://getcomposer.org/installer | sudo php -- --install-dir=/usr/local/bin --filename=composer || print_error "Не удалось установить Composer."
 else
     print_info "Composer уже установлен."
 fi
@@ -130,17 +143,15 @@ fi
 
 # --- 3. Загрузка файлов панели ---
 print_info "Создание директории и загрузка файлов Ctrlpanel..."
-sudo mkdir -p /var/www/ctrlpanel
-cd /var/www/ctrlpanel
-sudo git clone https://github.com/Ctrlpanel-gg/panel.git .
-if [ $? -ne 0 ]; then print_error "Не удалось загрузить файлы с GitHub."; fi
+sudo mkdir -p /var/www/ctrlpanel || print_error "Не удалось создать директорию /var/www/ctrlpanel."
+cd /var/www/ctrlpanel || print_error "Не удалось перейти в директорию /var/www/ctrlpanel."
+sudo git clone https://github.com/Ctrlpanel-gg/panel.git . || print_error "Не удалось загрузить файлы с GitHub."
 
 
 # --- 4. Настройка базы данных ---
 print_info "Настройка базы данных MariaDB..."
 # Запускаем MariaDB Secure Installation в неинтерактивном режиме
 sudo mysql_secure_installation <<EOF
-
 y
 $DB_PASSWORD
 $DB_PASSWORD
@@ -149,6 +160,7 @@ y
 y
 y
 EOF
+if [ $? -ne 0 ]; then print_error "Ошибка при выполнении mysql_secure_installation."; fi
 
 # Создаем пользователя и базу данных
 sudo mysql -u root -p"$DB_PASSWORD" <<MYSQL_SCRIPT
@@ -163,13 +175,11 @@ print_info "База данных '$DB_NAME' и пользователь '$DB_US
 
 # --- 5. Установка зависимостей Composer и настройка приложения ---
 print_info "Установка зависимостей Composer..."
-cd /var/www/ctrlpanel
-sudo COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader
-if [ $? -ne 0 ]; then print_error "Ошибка при установке зависимостей Composer."; fi
+cd /var/www/ctrlpanel || print_error "Не удалось перейти в директорию /var/www/ctrlpanel для установки Composer зависимостей."
+sudo COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader || print_error "Ошибка при установке зависимостей Composer."
 
 print_info "Создание символической ссылки на хранилище..."
-sudo php artisan storage:link
-if [ $? -ne 0 ]; then print_error "Не удалось создать символическую ссылку."; fi
+sudo php artisan storage:link || print_error "Не удалось создать символическую ссылку."
 
 
 # --- 6. Настройка веб-сервера Nginx и SSL ---
@@ -227,10 +237,8 @@ sudo ln -s -f /etc/nginx/sites-available/ctrlpanel.conf /etc/nginx/sites-enabled
 
 # Проверяем и перезапускаем Nginx, чтобы он загрузил новую конфигурацию
 print_info "Проверка и перезапуск Nginx перед получением SSL..."
-sudo nginx -t
-if [ $? -ne 0 ]; then print_error "Ошибка в конфигурации Nginx после создания начального файла."; fi
-sudo systemctl restart nginx
-if [ $? -ne 0 ]; then print_error "Не удалось перезапустить Nginx после создания начального файла."; fi
+sudo nginx -t || print_error "Ошибка в конфигурации Nginx после создания начального файла."
+sudo systemctl restart nginx || print_error "Не удалось перезапустить Nginx после создания начального файла."
 
 
 # Получаем SSL сертификат с повторными попытками
@@ -241,7 +249,7 @@ CERT_SUCCESS=false
 for i in $(seq 1 $MAX_RETRIES); do
     print_info "Попытка $i из $MAX_RETRIES: Получение SSL-сертификата для $DOMAIN..."
     # Certbot теперь должен найти существующий server block и настроить его
-    if sudo certbot --nginx -d $DOMAIN --non-interactive --agree-tos -m $ADMIN_EMAIL; then
+    if sudo certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$ADMIN_EMAIL"; then
         CERT_SUCCESS=true
         print_info "SSL-сертификат успешно получен и установлен!"
         break
@@ -261,15 +269,15 @@ fi
 
 # --- 7. Настройка прав доступа ---
 print_info "Настройка прав доступа к файлам..."
-sudo chown -R www-data:www-data /var/www/ctrlpanel/
-sudo chmod -R 755 /var/www/ctrlpanel/storage/* /var/www/ctrlpanel/bootstrap/cache/
+sudo chown -R www-data:www-data /var/www/ctrlpanel/ || print_error "Не удалось изменить владельца директории /var/www/ctrlpanel/."
+sudo chmod -R 755 /var/www/ctrlpanel/storage/* /var/www/ctrlpanel/bootstrap/cache/ || print_error "Не удалось настроить права доступа для директорий storage и bootstrap/cache."
 
 
 # --- 8. Настройка фоновых задач ---
 print_info "Настройка обработчика очереди и cron..."
 
 # Настройка cron
-(sudo crontab -l 2>/dev/null; echo "* * * * * php /var/www/ctrlpanel/artisan schedule:run >> /dev/null 2>&1") | sudo crontab -
+(sudo crontab -l 2>/dev/null; echo "* * * * * php /var/www/ctrlpanel/artisan schedule:run >> /dev/null 2>&1") | sudo crontab - || print_error "Не удалось добавить задачу cron."
 print_info "Задача cron добавлена."
 
 # Создание службы systemd для обработчика очереди
@@ -288,9 +296,10 @@ StartLimitBurst=0
 [Install]
 WantedBy=multi-user.target
 EOF
+if [ $? -ne 0 ]; then print_error "Не удалось создать службу systemd для обработчика очереди."; fi
 
 # Включение и запуск службы
-sudo systemctl enable --now ctrlpanel.service
+sudo systemctl enable --now ctrlpanel.service || print_error "Не удалось включить и запустить службу обработчика очереди."
 print_info "Служба обработчика очереди включена и запущена."
 
 
