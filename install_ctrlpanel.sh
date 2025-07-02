@@ -7,7 +7,7 @@
 
 # --- Переменные ---
 # Замените на ваш email для SSL сертификата
-ADMIN_EMAIL="admin@example.com"
+ADMIN_EMAIL="dani4eks@gmail.com"
 # Домен, который будет использоваться для панели
 DOMAIN="my.yoogo.su"
 # Генерируем случайный пароль для базы данных
