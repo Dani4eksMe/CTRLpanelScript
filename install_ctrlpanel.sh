@@ -117,12 +117,12 @@ print_info "Добавление репозитория MariaDB..."
 curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash || print_error "Не удалось добавить репозиторий MariaDB."
 
 # Обновление списка пакетов после добавления репозиториев
-print_info "Повторное обновление списка пакетов..."
-sudo apt-get update || print_error "Не удалось повторно обновить список пакетов после добавления репозиториев."
+print_info "Повторное обновление списка пакетов и очистка кэша apt..."
+sudo apt-get clean && sudo apt-get update || print_error "Не удалось повторно обновить список пакетов или очистить кэш apt."
 
 # Установка основных пакетов (добавлен ufw)
 print_info "Установка PHP, MariaDB, Nginx, Redis, UFW и других утилит..."
-sudo apt-get -y install php8.3 php8.3-{common,cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,redis} mariadb-server nginx git redis-server certbot python3-certbot-nginx ufw || print_error "Произошла ошибка при установке пакетов."
+sudo apt-get -y install php8.3 php8.3-{common,cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,redis} mariadb-server nginx git redis-server certbot python3-certbot-nginx ufw || print_error "Произошла ошибка при установке PHP 8.3 или других пакетов. Проверьте правильность PPA и доступность пакетов."
 
 # Вызов функции настройки брандмауэра
 check_and_configure_firewall
