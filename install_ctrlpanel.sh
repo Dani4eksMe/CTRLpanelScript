@@ -51,10 +51,11 @@ function cleanup_installation {
         sudo systemctl start mysql 2>/dev/null
     fi
 
-    if sudo mysql -u root -p"$DB_PASSWORD" -e "DROP DATABASE IF EXISTS $DB_NAME;" 2>/dev/null; then
+    # Используем sudo mysql -u root без пароля для очистки
+    if sudo mysql -u root -e "DROP DATABASE IF EXISTS $DB_NAME;" 2>/dev/null; then
         print_info "База данных '$DB_NAME' удалена."
     fi
-    if sudo mysql -u root -p"$DB_PASSWORD" -e "DROP USER IF EXISTS '$DB_USER'@'127.0.0.1';" 2>/dev/null; then
+    if sudo mysql -u root -e "DROP USER IF EXISTS '$DB_USER'@'127.0.0.1';" 2>/dev/null; then
         print_info "Пользователь базы данных '$DB_USER' удален."
     fi
 
@@ -238,13 +239,14 @@ EOF
 if [ $? -ne 0 ]; then print_error "Ошибка при выполнении mysql_secure_installation."; fi
 
 # Создаем пользователя и базу данных
-sudo mysql -u root -p"$DB_PASSWORD" <<MYSQL_SCRIPT
+# Используем sudo mysql -u root без пароля для выполнения SQL команд, так как root может быть настроен на аутентификацию через unix_socket
+sudo mysql -u root <<MYSQL_SCRIPT
 CREATE USER '$DB_USER'@'127.0.0.1' IDENTIFIED BY '$DB_PASSWORD';
 CREATE DATABASE $DB_NAME;
 GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'127.0.0.1';
 FLUSH PRIVILEGES;
 MYSQL_SCRIPT
-if [ $? -ne 0 ]; then print_error "Не удалось создать базу данных или пользователя."; fi
+if [ $? -ne 0 ]; then print_error "Не удалось создать базу данных или пользователя. Проверьте пароль root для MySQL/MariaDB или настройки аутентификации."; fi
 print_info "База данных '$DB_NAME' и пользователь '$DB_USER' успешно созданы."
 
 
