@@ -1,19 +1,20 @@
 #!/bin/bash
 
 # Скрипт для автоматической установки Ctrlpanel на Ubuntu 20.04
-# Домен: my.yoogo.su
 # ВНИМАНИЕ: Запускайте этот скрипт от имени пользователя с sudo-правами или от root.
 # Скрипт установит все необходимые компоненты и настроит панель.
 
-# --- Переменные ---
-# Замените на ваш email для SSL сертификата
-ADMIN_EMAIL="dani4eks@gmail.com"
-# Домен, который будет использоваться для панели
-DOMAIN="my.yoogo.su"
-# Генерируем случайный пароль для базы данных
-DB_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)
-DB_USER="ctrlpaneluser"
-DB_NAME="ctrlpanel"
+# --- Красивая надпись ---
+echo -e "\e[1;36m"
+echo "  ____             _ __  __          "
+echo " |  _ \\           | |  \\/  |         "
+echo " | |_) | __ _  ___| | \\  / | ___ ___ "
+echo " |  _ < / _\` |/ _ \\ | |\\/| |/ _ \\ __|"
+echo " | |_) | (_| |  __/ | |  | |  __/ |  "
+echo " |____/ \\__,_|\\___|_|_|  |_|\\___|_|  "
+echo "                                     "
+echo "          by Dani4eksMe              "
+echo -e "\e[0m"
 
 # --- Функции ---
 # Функция для вывода информационных сообщений
@@ -30,6 +31,7 @@ function cleanup_installation {
     sudo systemctl daemon-reload 2>/dev/null
     sudo systemctl stop nginx 2>/dev/null
     sudo systemctl stop mariadb 2>/dev/null
+    sudo systemctl stop mysql 2>/dev/null # Добавлено для MySQL
     sudo systemctl stop redis-server 2>/dev/null
 
     print_info "Удаление cron задачи..."
@@ -41,24 +43,42 @@ function cleanup_installation {
     # Удаляем SSL-сертификаты и связанные конфигурации Certbot
     sudo certbot delete --non-interactive --cert-name "$DOMAIN" 2>/dev/null
 
-    print_info "Удаление базы данных и пользователя MariaDB..."
-    # Убедимся, что MariaDB запущена для очистки
-    sudo systemctl start mariadb 2>/dev/null
+    print_info "Удаление базы данных и пользователя..."
+    # Убедимся, что служба базы данных запущена для очистки
+    if [[ "$DB_TYPE" == "mariadb" ]]; then
+        sudo systemctl start mariadb 2>/dev/null
+    elif [[ "$DB_TYPE" == "mysql" ]]; then
+        sudo systemctl start mysql 2>/dev/null
+    fi
+
     if sudo mysql -u root -p"$DB_PASSWORD" -e "DROP DATABASE IF EXISTS $DB_NAME;" 2>/dev/null; then
         print_info "База данных '$DB_NAME' удалена."
     fi
     if sudo mysql -u root -p"$DB_PASSWORD" -e "DROP USER IF EXISTS '$DB_USER'@'127.0.0.1';" 2>/dev/null; then
         print_info "Пользователь базы данных '$DB_USER' удален."
     fi
-    sudo systemctl stop mariadb 2>/dev/null
 
+    if [[ "$DB_TYPE" == "mariadb" ]]; then
+        sudo systemctl stop mariadb 2>/dev/null
+    elif [[ "$DB_TYPE" == "mysql" ]]; then
+        sudo systemctl stop mysql 2>/dev/null
+    fi
 
     print_info "Удаление директории приложения..."
     sudo rm -rf /var/www/ctrlpanel 2>/dev/null
 
     print_info "Удаление установленных пакетов..."
     # Список пакетов, которые могли быть установлены скриптом
-    PACKAGES_TO_REMOVE="php8.3 php8.3-common php8.3-cli php8.3-gd php8.3-mysql php8.3-mbstring php8.3-bcmath php8.3-xml php8.3-fpm php8.3-curl php8.3-zip php8.3-intl php8.3-redis mariadb-server nginx git redis-server certbot python3-certbot-nginx ufw composer"
+    PACKAGES_TO_REMOVE="php8.3 php8.3-common php8.3-cli php8.3-gd php8.3-mysql php8.3-mbstring php8.3-bcmath php8.3-xml php8.3-fpm php8.3-curl php8.3-zip php8.3-intl php8.3-redis nginx git redis-server certbot python3-certbot-nginx ufw composer"
+    if [[ "$DB_TYPE" == "mariadb" ]]; then
+        PACKAGES_TO_REMOVE+=" mariadb-server"
+    elif [[ "$DB_TYPE" == "mysql" ]]; then
+        PACKAGES_TO_REMOVE+=" mysql-server mysql-client mysql-common"
+        # Удаление репозитория MySQL APT
+        sudo rm -f /etc/apt/sources.list.d/mysql.list 2>/dev/null
+        sudo rm -f /etc/apt/trusted.gpg.d/mysql.gpg 2>/dev/null
+    fi
+
     for pkg in $PACKAGES_TO_REMOVE; do
         if dpkg -s "$pkg" &>/dev/null; then # Проверяем, установлен ли пакет
             print_info "Удаление пакета: $pkg"
@@ -72,7 +92,7 @@ function cleanup_installation {
     # Эта часть закомментирована, так как может быть слишком агрессивной, раскомментируйте, если действительно необходимо.
     # sudo add-apt-repository --remove ppa:ondrej/php -y 2>/dev/null
     # sudo rm -f /etc/apt/sources.list.d/redis.list 2>/dev/null
-    # sudo rm -f /etc/apt/sources.list.d/mariadb.list 2>/dev/null
+    # sudo rm -f /etc/apt/sources.list.d/mariadb.list 2>/dev/null # Для MariaDB
     # sudo apt-get update 2>/dev/null
 }
 
@@ -93,6 +113,45 @@ function print_error {
     exit 1
 }
 
+# Функция для запроса ввода пользователя
+function get_user_input {
+    local prompt_message=$1
+    local default_value=$2
+    local input_var=$3
+
+    read -p "$(echo -e "\n\e[33m[ВОПРОС]\e[0m $prompt_message [По умолчанию: $default_value]: ")" user_input
+    if [[ -z "$user_input" ]]; then
+        eval "$input_var=\"$default_value\""
+    else
+        eval "$input_var=\"$user_input\""
+    fi
+}
+
+# --- Запрос пользовательских данных ---
+print_info "Настройка параметров установки:"
+
+get_user_input "Введите адрес сайта (домен или IP-адрес)" "my.yoogo.su" DOMAIN
+get_user_input "Введите email для SSL-сертификата (например, admin@example.com)" "admin@example.com" ADMIN_EMAIL
+
+DB_TYPE_CHOICE="mysql"
+while true; do
+    read -p "$(echo -e "\n\e[33m[ВОПРОС]\e[0m Выберите тип базы данных (mariadb/mysql) [По умолчанию: mysql]: ")" DB_TYPE_INPUT
+    DB_TYPE_INPUT=${DB_TYPE_INPUT:-$DB_TYPE_CHOICE} # Устанавливаем значение по умолчанию, если ввод пуст
+    if [[ "$DB_TYPE_INPUT" == "mariadb" || "$DB_TYPE_INPUT" == "mysql" ]]; then
+        DB_TYPE="$DB_TYPE_INPUT"
+        break
+    else
+        echo -e "\e[31mНеверный выбор. Пожалуйста, введите 'mariadb' или 'mysql'.\e[0m"
+    fi
+done
+
+get_user_input "Введите порт базы данных" "3306" DB_PORT
+get_user_input "Введите имя базы данных" "ctrlpanel" DB_NAME
+get_user_input "Введите имя пользователя базы данных" "ctrlpaneluser" DB_USER
+
+DEFAULT_DB_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)
+get_user_input "Введите пароль пользователя базы данных (или нажмите Enter для генерации случайного)" "$DEFAULT_DB_PASSWORD" DB_PASSWORD
+
 
 # --- Начало установки ---
 print_info "Начало установки Ctrlpanel для домена $DOMAIN"
@@ -101,7 +160,7 @@ sleep 3
 # --- 1. Установка зависимостей ---
 print_info "Обновление системы и установка базовых зависимостей..."
 sudo apt-get update || print_error "Не удалось обновить список пакетов."
-sudo apt-get -y install software-properties-common curl apt-transport-https ca-certificates gnupg || print_error "Не удалось установить базовые зависимости."
+sudo apt-get -y install software-properties-common curl apt-transport-https ca-certificates gnupg wget || print_error "Не удалось установить базовые зависимости." # Добавлен wget
 
 # Добавление репозитория PHP
 print_info "Добавление PPA для PHP 8.3..."
@@ -112,17 +171,32 @@ print_info "Добавление репозитория Redis..."
 curl -fsSL https://packages.redis.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg || print_error "Не удалось добавить ключ GPG для Redis."
 echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/redis.list || print_error "Не удалось добавить репозиторий Redis."
 
-# Добавление репозитория MariaDB
-print_info "Добавление репозитория MariaDB..."
-curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash || print_error "Не удалось добавить репозиторий MariaDB."
+# Добавление репозитория базы данных
+if [[ "$DB_TYPE" == "mariadb" ]]; then
+    print_info "Добавление репозитория MariaDB..."
+    curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash || print_error "Не удалось добавить репозиторий MariaDB."
+elif [[ "$DB_TYPE" == "mysql" ]]; then
+    print_info "Добавление репозитория MySQL 8..."
+    # Скачиваем и устанавливаем пакет конфигурации репозитория MySQL APT
+    wget https://dev.mysql.com/get/mysql-apt-config_0.8.29-1_all.deb -O /tmp/mysql-apt-config.deb || print_error "Не удалось скачать пакет конфигурации MySQL APT."
+    echo "mysql-apt-config mysql-apt-config/select-server select mysql-8.0" | sudo debconf-set-selections
+    sudo DEBIAN_FRONTEND=noninteractive dpkg -i /tmp/mysql-apt-config.deb || print_error "Не удалось установить пакет конфигурации MySQL APT."
+    rm /tmp/mysql-apt-config.deb
+fi
 
 # Обновление списка пакетов после добавления репозиториев
 print_info "Повторное обновление списка пакетов и очистка кэша apt..."
 sudo apt-get clean && sudo apt-get update || print_error "Не удалось повторно обновить список пакетов или очистить кэш apt."
 
 # Установка основных пакетов (добавлен ufw)
-print_info "Установка PHP, MariaDB, Nginx, Redis, UFW и других утилит..."
-sudo apt-get -y install php8.3 php8.3-{common,cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,redis} mariadb-server nginx git redis-server certbot python3-certbot-nginx ufw || print_error "Произошла ошибка при установке PHP 8.3 или других пакетов. Проверьте правильность PPA и доступность пакетов."
+print_info "Установка PHP, $DB_TYPE, Nginx, Redis, UFW и других утилит..."
+DB_PACKAGE=""
+if [[ "$DB_TYPE" == "mariadb" ]]; then
+    DB_PACKAGE="mariadb-server"
+elif [[ "$DB_TYPE" == "mysql" ]]; then
+    DB_PACKAGE="mysql-server"
+fi
+sudo apt-get -y install php8.3 php8.3-{common,cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,redis} "$DB_PACKAGE" nginx git redis-server certbot python3-certbot-nginx ufw || print_error "Произошла ошибка при установке PHP 8.3 или других пакетов. Проверьте правильность PPA и доступность пакетов."
 
 # Вызов функции настройки брандмауэра
 check_and_configure_firewall
@@ -149,8 +223,9 @@ sudo git clone https://github.com/Ctrlpanel-gg/panel.git . || print_error "Не 
 
 
 # --- 4. Настройка базы данных ---
-print_info "Настройка базы данных MariaDB..."
-# Запускаем MariaDB Secure Installation в неинтерактивном режиме
+print_info "Настройка базы данных $DB_TYPE..."
+# Запускаем Secure Installation в неинтерактивном режиме
+# Примечание: mysql_secure_installation работает как для MariaDB, так и для MySQL
 sudo mysql_secure_installation <<EOF
 y
 $DB_PASSWORD
@@ -261,7 +336,7 @@ done
 
 if [ "$CERT_SUCCESS" = false ]; then
     print_error "Не удалось получить или установить SSL-сертификат после $MAX_RETRIES попыток. Убедитесь, что:\n" \
-                "  - DNS A-запись для $DOMAIN указывает на IP этого сервера и полностью распространилась (что вы уже подтвердили).\n" \
+                "  - DNS A-запись для $DOMAIN указывает на IP этого сервера и полностью распространилась.\n" \
                 "  - Отсутствуют блокировки брандмауэром (например, UFW настроен правильно, как мы пытались сделать, или другие внешние брандмауэры).\n" \
                 "  - Вы не превысили ограничения Let's Encrypt на количество запросов (подождите 1-2 часа и попробуйте снова).\n" \
                 "  Пожалуйста, проверьте логи Certbot: /var/log/letsencrypt/letsencrypt.log для более подробной информации."
@@ -310,7 +385,9 @@ echo -e "Теперь вы можете перейти в браузере по 
 echo -e "Вам нужно будет завершить установку через веб-интерфейс."
 echo -e ""
 echo -e "Данные для подключения к базе данных:"
+echo -e "  Тип БД:    \e[1m$DB_TYPE\e[0m"
 echo -e "  Хост:      \e[1m127.0.0.1\e[0m"
+echo -e "  Порт:      \e[1m$DB_PORT\e[0m"
 echo -e "  База данных: \e[1m$DB_NAME\e[0m"
 echo -e "  Пользователь:  \e[1m$DB_USER\e[0m"
 echo -e "  Пароль:    \e[1m$DB_PASSWORD\e[0m"
