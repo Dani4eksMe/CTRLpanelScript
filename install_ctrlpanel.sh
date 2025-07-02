@@ -55,8 +55,15 @@ function cleanup_installation {
     if sudo mysql -u root -e "DROP DATABASE IF EXISTS $DB_NAME;" 2>/dev/null; then
         print_info "База данных '$DB_NAME' удалена."
     fi
-    if sudo mysql -u root -e "DROP USER IF EXISTS '$DB_USER'@'127.0.0.1';" 2>/dev/null; then
-        print_info "Пользователь базы данных '$DB_USER' удален."
+    # Удаляем пользователя только если он был создан на localhost
+    if [[ "$DB_HOST" == "127.0.0.1" || "$DB_HOST" == "localhost" ]]; then
+        if sudo mysql -u root -e "DROP USER IF EXISTS '$DB_USER'@'localhost';" 2>/dev/null; then
+            print_info "Пользователь базы данных '$DB_USER'@'localhost' удален."
+        fi
+    else
+        if sudo mysql -u root -e "DROP USER IF EXISTS '$DB_USER'@'$DB_HOST';" 2>/dev/null; then
+            print_info "Пользователь базы данных '$DB_USER'@'$DB_HOST' удален."
+        fi
     fi
 
     if [[ "$DB_TYPE" == "mariadb" ]]; then
@@ -101,10 +108,10 @@ function cleanup_installation {
 function print_error {
     echo -e "\n\e[31m[ERROR]\e[0m $1" >&2 # Вывод в stderr
     echo -e "\n\e[31mУстановка не может быть продолжена из-за ошибки.\e[0m" >&2
-    echo -e "Хотите ли вы очистить все, что было установлено скриптом до этого момента? (Нажмите ПРОБЕЛ для подтверждения, любую другую клавишу для выхода)"
+    echo -e "Хотите ли вы очистить все, что было установлено скриптом до этого момента? (Нажмите Y для подтверждения, любую другую клавишу для выхода)"
     read -n 1 -s -r KEY # Читаем один символ без отображения
     echo # Новая строка после ввода
-    if [[ "$KEY" == " " ]]; then
+    if [[ "$KEY" == "Y" || "$KEY" == "y" ]]; then # Изменено условие на 'Y' или 'y'
         print_info "Начало очистки..."
         cleanup_installation
         print_info "Очистка завершена. Выход."
@@ -146,6 +153,7 @@ while true; do
     fi
 done
 
+get_user_input "Введите адрес хоста базы данных" "127.0.0.1" DB_HOST
 get_user_input "Введите порт базы данных" "3306" DB_PORT
 get_user_input "Введите имя базы данных" "ctrlpanel" DB_NAME
 get_user_input "Введите имя пользователя базы данных" "ctrlpaneluser" DB_USER
@@ -225,29 +233,30 @@ sudo git clone https://github.com/Ctrlpanel-gg/panel.git . || print_error "Не 
 
 # --- 4. Настройка базы данных ---
 print_info "Настройка базы данных $DB_TYPE..."
-# Запускаем Secure Installation в неинтерактивном режиме
-# Примечание: mysql_secure_installation работает как для MariaDB, так и для MySQL
-sudo mysql_secure_installation <<EOF
-y
-$DB_PASSWORD
-$DB_PASSWORD
-y
-y
-y
-y
-EOF
-if [ $? -ne 0 ]; then print_error "Ошибка при выполнении mysql_secure_installation."; fi
+# Примечание: mysql_secure_installation интерактивна и может вызвать проблемы в скриптах.
+# Мы пропускаем ее для автоматизации, но рекомендуем запустить вручную после установки.
+# sudo mysql_secure_installation <<EOF
+# y
+# $DB_PASSWORD
+# $DB_PASSWORD
+# y
+# y
+# y
+# y
+# EOF
+# if [ $? -ne 0 ]; then print_error "Ошибка при выполнении mysql_secure_installation."; fi
 
 # Создаем пользователя и базу данных
-# Используем sudo mysql -u root без пароля для выполнения SQL команд, так как root может быть настроен на аутентификацию через unix_socket
+# Используем sudo mysql -u root без пароля для выполнения SQL команд,
+# так как root пользователь базы данных часто настроен на аутентификацию через unix_socket.
 sudo mysql -u root <<MYSQL_SCRIPT
-CREATE USER '$DB_USER'@'127.0.0.1' IDENTIFIED BY '$DB_PASSWORD';
+CREATE USER '$DB_USER'@'$DB_HOST' IDENTIFIED BY '$DB_PASSWORD';
 CREATE DATABASE $DB_NAME;
-GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'127.0.0.1';
+GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'$DB_HOST';
 FLUSH PRIVILEGES;
 MYSQL_SCRIPT
-if [ $? -ne 0 ]; then print_error "Не удалось создать базу данных или пользователя. Проверьте пароль root для MySQL/MariaDB или настройки аутентификации."; fi
-print_info "База данных '$DB_NAME' и пользователь '$DB_USER' успешно созданы."
+if [ $? -ne 0 ]; then print_error "Не удалось создать базу данных или пользователя. Возможно, потребуется вручную настроить пользователя 'root' базы данных или запустить 'mysql_secure_installation'."; fi
+print_info "База данных '$DB_NAME' и пользователь '$DB_USER'@'$DB_HOST' успешно созданы."
 
 
 # --- 5. Установка зависимостей Composer и настройка приложения ---
@@ -388,7 +397,7 @@ echo -e "Вам нужно будет завершить установку че
 echo -e ""
 echo -e "Данные для подключения к базе данных:"
 echo -e "  Тип БД:    \e[1m$DB_TYPE\e[0m"
-echo -e "  Хост:      \e[1m127.0.0.1\e[0m"
+echo -e "  Хост:      \e[1m$DB_HOST\e[0m"
 echo -e "  Порт:      \e[1m$DB_PORT\e[0m"
 echo -e "  База данных: \e[1m$DB_NAME\e[0m"
 echo -e "  Пользователь:  \e[1m$DB_USER\e[0m"
