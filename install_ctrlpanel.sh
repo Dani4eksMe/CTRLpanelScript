@@ -35,7 +35,10 @@ function cleanup_installation {
     sudo systemctl stop redis-server 2>/dev/null
 
     print_info "Удаление cron задачи..."
-    (sudo crontab -l 2>/dev/null | grep -v "/var/www/ctrlpanel/artisan schedule:run") | sudo crontab - 2>/dev/null
+    # Проверяем, существует ли crontab перед попыткой удаления задачи
+    if command -v crontab &> /dev/null; then
+        (sudo crontab -l 2>/dev/null | grep -v "/var/www/ctrlpanel/artisan schedule:run") | sudo crontab - 2>/dev/null
+    fi
 
     print_info "Удаление конфигураций Nginx и SSL-сертификатов..."
     sudo rm -f /etc/nginx/sites-enabled/ctrlpanel.conf 2>/dev/null
@@ -71,7 +74,7 @@ function cleanup_installation {
 
     print_info "Удаление установленных пакетов..."
     # Список пакетов, которые могли быть установлены скриптом
-    PACKAGES_TO_REMOVE="php8.3 php8.3-common php8.3-cli php8.3-gd php8.3-mysql php8.3-mbstring php8.3-bcmath php8.3-xml php8.3-fpm php8.3-curl php8.3-zip php8.3-intl php8.3-redis nginx git redis-server certbot python3-certbot-nginx ufw composer"
+    PACKAGES_TO_REMOVE="php8.3 php8.3-common php8.3-cli php8.3-gd php8.3-mysql php8.3-mbstring php8.3-bcmath php8.3-xml php8.3-fpm php8.3-curl php8.3-zip php8.3-intl php8.3-redis nginx git redis-server certbot python3-certbot-nginx ufw composer cron" # Добавлен cron
     if [[ "$DB_TYPE" == "mariadb" ]]; then
         PACKAGES_TO_REMOVE+=" mariadb-server"
     elif [[ "$DB_TYPE" == "mysql" ]]; then
@@ -247,15 +250,15 @@ fi
 print_info "Повторное обновление списка пакетов и очистка кэша apt..."
 sudo apt-get clean && sudo apt-get update || print_error "Не удалось повторно обновить список пакетов или очистить кэш apt."
 
-# Установка основных пакетов (добавлен ufw)
-print_info "Установка PHP, $DB_TYPE, Nginx, Redis, UFW и других утилит..."
+# Установка основных пакетов (добавлен ufw и cron)
+print_info "Установка PHP, $DB_TYPE, Nginx, Redis, UFW, Cron и других утилит..."
 DB_PACKAGE=""
 if [[ "$DB_TYPE" == "mariadb" ]]; then
     DB_PACKAGE="mariadb-server"
 elif [[ "$DB_TYPE" == "mysql" ]]; then
     DB_PACKAGE="mysql-server"
 fi
-sudo apt-get -y install php8.3 php8.3-{common,cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,redis} "$DB_PACKAGE" nginx git redis-server certbot python3-certbot-nginx ufw || print_error "Произошла ошибка при установке PHP 8.3 или других пакетов. Проверьте правильность PPA и доступность пакетов."
+sudo apt-get -y install php8.3 php8.3-{common,cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip,intl,redis} "$DB_PACKAGE" nginx git redis-server certbot python3-certbot-nginx ufw cron || print_error "Произошла ошибка при установке PHP 8.3 или других пакетов. Проверьте правильность PPA и доступность пакетов."
 
 # Вызов функции настройки брандмауэра
 check_and_configure_firewall
