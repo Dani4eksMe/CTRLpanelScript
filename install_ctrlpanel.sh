@@ -52,18 +52,12 @@ function cleanup_installation {
     fi
 
     # Используем sudo mysql -u root без пароля для очистки
-    if sudo mysql -u root -e "DROP DATABASE IF EXISTS $DB_NAME;" 2>/dev/null; then
+    if sudo mysql -u root -p"$DB_PASSWORD" -e "DROP DATABASE IF EXISTS $DB_NAME;" 2>/dev/null; then
         print_info "База данных '$DB_NAME' удалена."
     fi
-    # Удаляем пользователя только если он был создан на localhost
-    if [[ "$DB_HOST" == "127.0.0.1" || "$DB_HOST" == "localhost" ]]; then
-        if sudo mysql -u root -e "DROP USER IF EXISTS '$DB_USER'@'localhost';" 2>/dev/null; then
-            print_info "Пользователь базы данных '$DB_USER'@'localhost' удален."
-        fi
-    else
-        if sudo mysql -u root -e "DROP USER IF EXISTS '$DB_USER'@'$DB_HOST';" 2>/dev/null; then
-            print_info "Пользователь базы данных '$DB_USER'@'$DB_HOST' удален."
-        fi
+    # Удаляем пользователя только если он был создан на localhost или указанном хосте
+    if sudo mysql -u root -p"$DB_PASSWORD" -e "DROP USER IF EXISTS '$DB_USER'@'$DB_HOST';" 2>/dev/null; then
+        print_info "Пользователь базы данных '$DB_USER'@'$DB_HOST' удален."
     fi
 
     if [[ "$DB_TYPE" == "mariadb" ]]; then
@@ -135,6 +129,56 @@ function get_user_input {
     fi
 }
 
+# Функция для проверки и настройки брандмауэра UFW
+function check_and_configure_firewall {
+    print_info "Проверка и настройка брандмауэра UFW..."
+    if command -v ufw &> /dev/null; then
+        UFW_STATUS=$(sudo ufw status | grep "Status: active")
+        if [[ "$UFW_STATUS" == *"Status: active"* ]]; then
+            print_info "UFW активен. Проверка правил для портов 80, 443 и OpenSSH..."
+            
+            # Проверка и разрешение порта 80
+            PORT_80_ALLOWED=$(sudo ufw status | grep -E "80\s+(ALLOW|ALLOW IN)")
+            if [[ -z "$PORT_80_ALLOWED" ]]; then
+                print_info "Порт 80 не разрешен. Добавление правила..."
+                sudo ufw allow 80/tcp
+                if [ $? -ne 0 ]; then print_error "Не удалось разрешить порт 80 в UFW."; fi
+            else
+                print_info "Порт 80 уже разрешен."
+            fi
+
+            # Проверка и разрешение порта 443
+            PORT_443_ALLOWED=$(sudo ufw status | grep -E "443\s+(ALLOW|ALLOW IN)")
+            if [[ -z "$PORT_443_ALLOWED" ]]; then
+                print_info "Порт 443 не разрешен. Добавление правила..."
+                sudo ufw allow 443/tcp
+                if [ $? -ne 0 ]; then print_error "Не удалось разрешить порт 443 в UFW."; fi
+            else
+                print_info "Порт 443 уже разрешен."
+            fi
+            
+            # Проверка и разрешение OpenSSH (чтобы не заблокировать себя)
+            SSH_ALLOWED=$(sudo ufw status | grep -E "OpenSSH\s+ALLOW")
+            if [[ -z "$SSH_ALLOWED" ]]; then
+                print_info "OpenSSH не разрешен. Добавление правила..."
+                sudo ufw allow OpenSSH
+                if [ $? -ne 0 ]; then print_error "Не удалось разрешить OpenSSH в UFW."; fi
+            else
+                print_info "OpenSSH уже разрешен."
+            fi
+
+            print_info "Перезагрузка UFW для применения изменений..."
+            sudo ufw reload
+            print_info "UFW настроен."
+        else
+            print_info "UFW не активен. Продолжаем без настройки UFW."
+        fi
+    else
+        print_info "UFW не установлен. Продолжаем без настройки UFW."
+    fi
+}
+
+
 # --- Запрос пользовательских данных ---
 print_info "Настройка параметров установки:"
 
@@ -188,7 +232,13 @@ elif [[ "$DB_TYPE" == "mysql" ]]; then
     print_info "Добавление репозитория MySQL 8..."
     # Скачиваем и устанавливаем пакет конфигурации репозитория MySQL APT
     wget https://dev.mysql.com/get/mysql-apt-config_0.8.29-1_all.deb -O /tmp/mysql-apt-config.deb || print_error "Не удалось скачать пакет конфигурации MySQL APT."
+    
+    # Предварительная настройка debconf для MySQL
     echo "mysql-apt-config mysql-apt-config/select-server select mysql-8.0" | sudo debconf-set-selections
+    echo "mysql-community-server mysql-community-server/root-pass password $DB_PASSWORD" | sudo debconf-set-selections
+    echo "mysql-community-server mysql-community-server/re-root-pass password $DB_PASSWORD" | sudo debconf-set-selections
+    echo "mysql-community-server mysql-community-server/default-auth-plugin select mysql_native_password" | sudo debconf-set-selections # Выбираем более совместимый метод аутентификации
+
     sudo DEBIAN_FRONTEND=noninteractive dpkg -i /tmp/mysql-apt-config.deb || print_error "Не удалось установить пакет конфигурации MySQL APT."
     rm /tmp/mysql-apt-config.deb
 fi
@@ -233,29 +283,15 @@ sudo git clone https://github.com/Ctrlpanel-gg/panel.git . || print_error "Не 
 
 # --- 4. Настройка базы данных ---
 print_info "Настройка базы данных $DB_TYPE..."
-# Примечание: mysql_secure_installation интерактивна и может вызвать проблемы в скриптах.
-# Мы пропускаем ее для автоматизации, но рекомендуем запустить вручную после установки.
-# sudo mysql_secure_installation <<EOF
-# y
-# $DB_PASSWORD
-# $DB_PASSWORD
-# y
-# y
-# y
-# y
-# EOF
-# if [ $? -ne 0 ]; then print_error "Ошибка при выполнении mysql_secure_installation."; fi
-
 # Создаем пользователя и базу данных
-# Используем sudo mysql -u root без пароля для выполнения SQL команд,
-# так как root пользователь базы данных часто настроен на аутентификацию через unix_socket.
-sudo mysql -u root <<MYSQL_SCRIPT
+# Используем sudo mysql -u root с паролем, установленным через debconf
+sudo mysql -u root -p"$DB_PASSWORD" <<MYSQL_SCRIPT
 CREATE USER '$DB_USER'@'$DB_HOST' IDENTIFIED BY '$DB_PASSWORD';
 CREATE DATABASE $DB_NAME;
 GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'$DB_HOST';
 FLUSH PRIVILEGES;
 MYSQL_SCRIPT
-if [ $? -ne 0 ]; then print_error "Не удалось создать базу данных или пользователя. Возможно, потребуется вручную настроить пользователя 'root' базы данных или запустить 'mysql_secure_installation'."; fi
+if [ $? -ne 0 ]; then print_error "Не удалось создать базу данных или пользователя. Проверьте пароль root для MySQL/MariaDB или настройки аутентификации."; fi
 print_info "База данных '$DB_NAME' и пользователь '$DB_USER'@'$DB_HOST' успешно созданы."
 
 
